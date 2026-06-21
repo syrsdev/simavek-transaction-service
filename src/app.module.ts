@@ -1,9 +1,11 @@
 import { Module } from '@nestjs/common';
-import { PrismaService } from './prisma/prisma/prisma.service';
-import { PrismaModule } from './prisma/prisma/prisma.module';
 import { GraphQLModule } from '@nestjs/graphql';
 import { ApolloDriver, ApolloDriverConfig } from '@nestjs/apollo';
 import { join } from 'path';
+import { TransactionsModule } from 'transactions/transactions.module';
+import { TransactionsService } from 'transactions/transactions.service';
+import { PrismaModule } from 'prisma/prisma.module';
+import { PrismaService } from 'prisma/prisma.service';
 
 @Module({
   imports: [
@@ -15,7 +17,8 @@ import { join } from 'path';
       playground: true,
     }),
     PrismaModule,
+    TransactionsModule,
   ],
-  providers: [PrismaService],
+  providers: [PrismaService, TransactionsService],
 })
 export class AppModule {}
