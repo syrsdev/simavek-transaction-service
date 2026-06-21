@@ -14,5 +14,17 @@ services:
     volumes:
       - transaction_db_data:/var/lib/postgresql/data
 
+  transaction-service:
+    build: .
+    container_name: transaction-service
+    restart: always
+    depends_on:
+      - transaction-db
+    environment:
+      DATABASE_URL: "postgresql://postgres:postgres@transaction-db:5432/transaction_db?schema=public"
+      PORT: 3001
+    ports:
+      - "3001:3001"
+
 volumes:
   transaction_db_data:
