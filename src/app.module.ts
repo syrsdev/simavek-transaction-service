@@ -1,24 +1,26 @@
 import { Module } from '@nestjs/common';
+import { ConfigModule } from '@nestjs/config';
 import { GraphQLModule } from '@nestjs/graphql';
 import { ApolloDriver, ApolloDriverConfig } from '@nestjs/apollo';
 import { join } from 'path';
-import { TransactionsModule } from 'transactions/transactions.module';
-import { TransactionsService } from 'transactions/transactions.service';
-import { PrismaModule } from 'prisma/prisma.module';
-import { PrismaService } from 'prisma/prisma.service';
+import { PrismaModule } from './prisma/prisma.module';
+import { TransactionsModule } from './transactions/transactions.module';
+import { InventoryModule } from './inventory/inventory.module';
 
 @Module({
   imports: [
+    ConfigModule.forRoot({
+      isGlobal: true, // bisa diakses di seluruh app tanpa import ulang
+    }),
     GraphQLModule.forRoot<ApolloDriverConfig>({
       driver: ApolloDriver,
-      // skema GraphQL akan di-generate OTOMATIS dari decorator di kode kita (code-first)
       autoSchemaFile: join(process.cwd(), 'src/schema.gql'),
       sortSchema: true,
       playground: true,
     }),
     PrismaModule,
+    InventoryModule,
     TransactionsModule,
   ],
-  providers: [PrismaService, TransactionsService],
 })
 export class AppModule {}

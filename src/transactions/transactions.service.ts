@@ -1,12 +1,23 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import {
+  Injectable,
+  NotFoundException,
+  BadRequestException,
+  Logger,
+} from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { InventoryService } from '../inventory/inventory.service';
 import { CreateTransactionInput } from './dto/create-transaction.input';
-import { TransactionType } from './entities/transaction-type.enum';
 import { UpdateTransactionInput } from './dto/update-transaction.input';
+import { TransactionType } from './entities/transaction-type.enum';
 
 @Injectable()
 export class TransactionsService {
-  constructor(private prisma: PrismaService) {}
+  private readonly logger = new Logger(TransactionsService.name);
+
+  constructor(
+    private prisma: PrismaService,
+    private inventoryService: InventoryService,
+  ) {}
 
   findAll() {
     return this.prisma.transaction.findMany({
@@ -26,16 +37,40 @@ export class TransactionsService {
     return transaction;
   }
 
-  create(input: CreateTransactionInput) {
-    const detailsData = input.items.map((item) => ({
+  async create(input: CreateTransactionInput) {
+    // 1. Ambil data obat dari Inventory Service
+    //    Harga diambil dari Inventory, bukan dari input client
+    //    supaya tidak bisa dimanipulasi
+    const medicines = await Promise.all(
+      input.items.map((item) =>
+        this.inventoryService.getMedicineById(item.medicineId),
+      ),
+    );
+
+    // 2. Validasi stok untuk transaksi sale
+    if (input.type === TransactionType.sale) {
+      for (let i = 0; i < input.items.length; i++) {
+        const medicine = medicines[i];
+        const item = input.items[i];
+        if (medicine.stock < item.quantity) {
+          throw new BadRequestException(
+            `Stok ${medicine.name} tidak mencukupi. Tersedia: ${medicine.stock}, diminta: ${item.quantity}`,
+          );
+        }
+      }
+    }
+
+    // 3. Hitung subtotal & total — harga dari Inventory Service
+    const detailsData = input.items.map((item, idx) => ({
       medicineId: item.medicineId,
       quantity: item.quantity,
-      price: item.price,
-      subtotal: item.price * item.quantity,
+      price: medicines[idx].price,
+      subtotal: Number(medicines[idx].price) * item.quantity,
     }));
     const totalAmount = detailsData.reduce((sum, d) => sum + d.subtotal, 0);
 
-    return this.prisma.transaction.create({
+    // 4. Simpan transaksi ke database kita
+    const transaction = await this.prisma.transaction.create({
       data: {
         trxNumber: this.generateTrxNumber(input.type),
         type: input.type,
@@ -44,28 +79,98 @@ export class TransactionsService {
       },
       include: { details: true },
     });
+
+    // 5. Update stok di Inventory Service
+    //    sale = stok berkurang (delta negatif)
+    //    purchase = stok bertambah (delta positif)
+    await Promise.all(
+      input.items.map((item) => {
+        const delta =
+          input.type === TransactionType.sale ? -item.quantity : item.quantity;
+        return this.inventoryService.adjustStock(item.medicineId, delta);
+      }),
+    );
+
+    this.logger.log(`Transaksi ${transaction.trxNumber} berhasil dibuat`);
+    return transaction;
   }
 
   async update(id: string, input: UpdateTransactionInput) {
-    await this.findOne(id); // pastikan ada, kalau tidak otomatis throw NotFoundException
+    const existing = await this.findOne(id);
 
     return this.prisma.$transaction(async (tx) => {
       const updateData: any = {};
       if (input.type) updateData.type = input.type;
 
       if (input.items) {
-        // ganti semua detail lama dengan yang baru
-        await tx.transactionDetail.deleteMany({ where: { transactionId: id } });
-        const detailsData = input.items.map((item) => ({
+        // Ambil data obat baru dari Inventory
+        const medicines = await Promise.all(
+          input.items.map((item) =>
+            this.inventoryService.getMedicineById(item.medicineId),
+          ),
+        );
+
+        // Kembalikan dulu efek stok dari transaksi LAMA
+        // (kebalikan dari tipe transaksi lama)
+        await Promise.all(
+          existing.details.map((detail: any) => {
+            const reverseDelta =
+              existing.type === TransactionType.sale
+                ? detail.quantity // sale lama → kembalikan stok (positif)
+                : -detail.quantity; // purchase lama → kurangi stok (negatif)
+            return this.inventoryService.adjustStock(
+              detail.medicineId,
+              reverseDelta,
+            );
+          }),
+        );
+
+        // Validasi stok untuk tipe BARU kalau sale
+        const newType = input.type ?? existing.type;
+        if (newType === TransactionType.sale) {
+          for (let i = 0; i < input.items.length; i++) {
+            if (medicines[i].stock < input.items[i].quantity) {
+              // Kalau tidak cukup, rollback dulu stok yang tadi dikembalikan
+              await Promise.all(
+                existing.details.map((detail: any) => {
+                  const redoDelta =
+                    existing.type === TransactionType.sale
+                      ? -detail.quantity
+                      : detail.quantity;
+                  return this.inventoryService.adjustStock(
+                    detail.medicineId,
+                    redoDelta,
+                  );
+                }),
+              );
+              throw new BadRequestException(
+                `Stok ${medicines[i].name} tidak mencukupi`,
+              );
+            }
+          }
+        }
+
+        // Terapkan efek stok BARU
+        await Promise.all(
+          input.items.map((item, idx) => {
+            const delta =
+              newType === TransactionType.sale ? -item.quantity : item.quantity;
+            return this.inventoryService.adjustStock(item.medicineId, delta);
+          }),
+        );
+
+        // Update detail di database
+        const detailsData = input.items.map((item, idx) => ({
           medicineId: item.medicineId,
           quantity: item.quantity,
-          price: item.price,
-          subtotal: item.price * item.quantity,
+          price: medicines[idx].price,
+          subtotal: Number(medicines[idx].price) * item.quantity,
         }));
         updateData.totalAmount = detailsData.reduce(
           (sum, d) => sum + d.subtotal,
           0,
         );
+        await tx.transactionDetail.deleteMany({ where: { transactionId: id } });
         updateData.details = { create: detailsData };
       }
 
@@ -78,8 +183,20 @@ export class TransactionsService {
   }
 
   async remove(id: string) {
-    await this.findOne(id);
-    await this.prisma.transaction.delete({ where: { id } }); // detail ikut terhapus otomatis (onDelete: Cascade)
+    const existing = await this.findOne(id);
+
+    // Kembalikan stok sebelum hapus transaksi
+    await Promise.all(
+      existing.details.map((detail: any) => {
+        const delta =
+          existing.type === TransactionType.sale
+            ? detail.quantity // sale dihapus → kembalikan stok
+            : -detail.quantity; // purchase dihapus → kurangi stok
+        return this.inventoryService.adjustStock(detail.medicineId, delta);
+      }),
+    );
+
+    await this.prisma.transaction.delete({ where: { id } });
     return true;
   }
 
