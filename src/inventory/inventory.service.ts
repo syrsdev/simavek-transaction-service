@@ -67,16 +67,15 @@ export class InventoryService {
         error instanceof Error
           ? error.message
           : typeof error === 'string'
-          ? error
-          : 'Unknown error';
+            ? error
+            : 'Unknown error';
       throw new InternalServerErrorException(
         `Gagal menghubungi Inventory Service: ${message}`,
       );
     }
   }
 
-  // Update stok obat - delta negatif untuk sale, positif untuk purchase
-  async adjustStock(medicineId: string, delta: number): Promise<void> {
+  async adjustStock(medicineId: string, delta: number): Promise<MedicineData> {
     const mutation = gql`
       mutation AdjustStock($id: uuid!, $delta: Int!) {
         update_medicines_by_pk(
@@ -84,20 +83,25 @@ export class InventoryService {
           _inc: { stock: $delta }
         ) {
           id
+          name
           stock
+          min_stock
         }
       }
     `;
 
     try {
-      await this.client.request(mutation, { id: medicineId, delta });
+      const result = await this.client.request<{
+        update_medicines_by_pk: MedicineData;
+      }>(mutation, { id: medicineId, delta });
+      return result.update_medicines_by_pk;
     } catch (error: unknown) {
       const message =
         error instanceof Error
           ? error.message
           : typeof error === 'string'
-          ? error
-          : 'Unknown error';
+            ? error
+            : 'Unknown error';
       throw new InternalServerErrorException(
         `Gagal update stok di Inventory Service: ${message}`,
       );

@@ -40,27 +40,22 @@ export class TransactionsService {
   }
 
   async create(input: CreateTransactionInput) {
-    // 1. Ambil data obat dari Inventory Service
     const medicines = await Promise.all(
       input.items.map((item) =>
         this.inventoryService.getMedicineById(item.medicineId),
       ),
     );
 
-    // 2. Validasi stok untuk transaksi sale
     if (input.type === TransactionType.sale) {
       for (let i = 0; i < input.items.length; i++) {
-        const medicine = medicines[i];
-        const item = input.items[i];
-        if (medicine.stock < item.quantity) {
+        if (medicines[i].stock < input.items[i].quantity) {
           throw new BadRequestException(
-            `Stok ${medicine.name} tidak mencukupi. Tersedia: ${medicine.stock}, diminta: ${item.quantity}`,
+            `Stok ${medicines[i].name} tidak mencukupi. Tersedia: ${medicines[i].stock}, diminta: ${input.items[i].quantity}`,
           );
         }
       }
     }
 
-    // 3. Hitung subtotal & total
     const detailsData = input.items.map((item, idx) => ({
       medicineId: item.medicineId,
       quantity: item.quantity,
@@ -69,7 +64,6 @@ export class TransactionsService {
     }));
     const totalAmount = detailsData.reduce((sum, d) => sum + d.subtotal, 0);
 
-    // 4. Simpan transaksi ke database
     const transaction = await this.prisma.transaction.create({
       data: {
         trxNumber: this.generateTrxNumber(input.type),
@@ -80,8 +74,8 @@ export class TransactionsService {
       include: { details: true },
     });
 
-    // 5. Update stok di Inventory Service
-    await Promise.all(
+    // Update stok & cek low stock
+    const updatedMedicines = await Promise.all(
       input.items.map((item) => {
         const delta =
           input.type === TransactionType.sale ? -item.quantity : item.quantity;
@@ -89,7 +83,20 @@ export class TransactionsService {
       }),
     );
 
-    // 6. Kirim event ke RabbitMQ
+    updatedMedicines.forEach((medicine) => {
+      if (medicine.stock <= medicine.min_stock) {
+        this.rabbitmqService.publishLowStock({
+          medicineId: medicine.id,
+          medicineName: medicine.name,
+          currentStock: medicine.stock,
+          minStock: medicine.min_stock,
+        });
+        this.logger.warn(
+          `Low stock: ${medicine.name} sisa ${medicine.stock} unit`,
+        );
+      }
+    });
+
     this.rabbitmqService.publishTransactionCompleted({
       trxNumber: transaction.trxNumber,
       transactionType: transaction.type as 'sale' | 'purchase',
@@ -100,7 +107,6 @@ export class TransactionsService {
     return transaction;
   }
 
-  // method update & remove tidak berubah, tetap sama seperti sebelumnya
   async update(id: string, input: UpdateTransactionInput) {
     const existing = await this.findOne(id);
 
@@ -152,7 +158,7 @@ export class TransactionsService {
         }
 
         await Promise.all(
-          input.items.map((item, idx) => {
+          input.items.map((item) => {
             const delta =
               newType === TransactionType.sale ? -item.quantity : item.quantity;
             return this.inventoryService.adjustStock(item.medicineId, delta);

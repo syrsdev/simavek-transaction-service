@@ -19,6 +19,19 @@ import { RabbitmqService } from './rabbitmq.service';
         }),
         inject: [ConfigService],
       },
+      {
+        name: 'RABBITMQ_LOW_STOCK_CLIENT',
+        imports: [ConfigModule],
+        useFactory: (config: ConfigService) => ({
+          transport: Transport.RMQ,
+          options: {
+            urls: [config.get<string>('RABBITMQ_URL', 'amqp://localhost:5672')],
+            queue: 'notification.low_stock',
+            queueOptions: { durable: true },
+          },
+        }),
+        inject: [ConfigService],
+      },
     ]),
   ],
   providers: [RabbitmqService],
