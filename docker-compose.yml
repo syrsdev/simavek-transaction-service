@@ -17,12 +17,11 @@ services:
       - simavek-network
 
   transaction-service:
-    build: ./simavek-transaction-service
+    build: .
     container_name: simavek-transaction-service
     restart: always
     depends_on:
       - transaction-db
-      - rabbitmq
     ports:
       - "3001:3001"
     environment:
@@ -36,3 +35,7 @@ services:
 
 volumes:
   transaction_db_data:
+
+networks:
+  simavek-network:
+    external: true
