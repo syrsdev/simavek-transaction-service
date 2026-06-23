@@ -6,6 +6,7 @@ import { join } from 'path';
 import { PrismaModule } from './prisma/prisma.module';
 import { TransactionsModule } from './transactions/transactions.module';
 import { InventoryModule } from './inventory/inventory.module';
+import { RabbitmqModule } from './rabbitmq/rabbitmq.module';
 
 @Module({
   imports: [
@@ -21,6 +22,7 @@ import { InventoryModule } from './inventory/inventory.module';
     PrismaModule,
     InventoryModule,
     TransactionsModule,
+    RabbitmqModule,
   ],
 })
 export class AppModule {}

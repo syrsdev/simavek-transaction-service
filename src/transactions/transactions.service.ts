@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { InventoryService } from '../inventory/inventory.service';
+import { RabbitmqService } from '../rabbitmq/rabbitmq.service';
 import { CreateTransactionInput } from './dto/create-transaction.input';
 import { UpdateTransactionInput } from './dto/update-transaction.input';
 import { TransactionType } from './entities/transaction-type.enum';
@@ -17,6 +18,7 @@ export class TransactionsService {
   constructor(
     private prisma: PrismaService,
     private inventoryService: InventoryService,
+    private rabbitmqService: RabbitmqService,
   ) {}
 
   findAll() {
@@ -39,8 +41,6 @@ export class TransactionsService {
 
   async create(input: CreateTransactionInput) {
     // 1. Ambil data obat dari Inventory Service
-    //    Harga diambil dari Inventory, bukan dari input client
-    //    supaya tidak bisa dimanipulasi
     const medicines = await Promise.all(
       input.items.map((item) =>
         this.inventoryService.getMedicineById(item.medicineId),
@@ -60,7 +60,7 @@ export class TransactionsService {
       }
     }
 
-    // 3. Hitung subtotal & total — harga dari Inventory Service
+    // 3. Hitung subtotal & total
     const detailsData = input.items.map((item, idx) => ({
       medicineId: item.medicineId,
       quantity: item.quantity,
@@ -69,7 +69,7 @@ export class TransactionsService {
     }));
     const totalAmount = detailsData.reduce((sum, d) => sum + d.subtotal, 0);
 
-    // 4. Simpan transaksi ke database kita
+    // 4. Simpan transaksi ke database
     const transaction = await this.prisma.transaction.create({
       data: {
         trxNumber: this.generateTrxNumber(input.type),
@@ -81,8 +81,6 @@ export class TransactionsService {
     });
 
     // 5. Update stok di Inventory Service
-    //    sale = stok berkurang (delta negatif)
-    //    purchase = stok bertambah (delta positif)
     await Promise.all(
       input.items.map((item) => {
         const delta =
@@ -91,10 +89,18 @@ export class TransactionsService {
       }),
     );
 
+    // 6. Kirim event ke RabbitMQ
+    this.rabbitmqService.publishTransactionCompleted({
+      trxNumber: transaction.trxNumber,
+      transactionType: transaction.type as 'sale' | 'purchase',
+      totalAmount: Number(transaction.totalAmount),
+    });
+
     this.logger.log(`Transaksi ${transaction.trxNumber} berhasil dibuat`);
     return transaction;
   }
 
+  // method update & remove tidak berubah, tetap sama seperti sebelumnya
   async update(id: string, input: UpdateTransactionInput) {
     const existing = await this.findOne(id);
 
@@ -103,21 +109,18 @@ export class TransactionsService {
       if (input.type) updateData.type = input.type;
 
       if (input.items) {
-        // Ambil data obat baru dari Inventory
         const medicines = await Promise.all(
           input.items.map((item) =>
             this.inventoryService.getMedicineById(item.medicineId),
           ),
         );
 
-        // Kembalikan dulu efek stok dari transaksi LAMA
-        // (kebalikan dari tipe transaksi lama)
         await Promise.all(
           existing.details.map((detail: any) => {
             const reverseDelta =
               existing.type === TransactionType.sale
-                ? detail.quantity // sale lama → kembalikan stok (positif)
-                : -detail.quantity; // purchase lama → kurangi stok (negatif)
+                ? detail.quantity
+                : -detail.quantity;
             return this.inventoryService.adjustStock(
               detail.medicineId,
               reverseDelta,
@@ -125,12 +128,10 @@ export class TransactionsService {
           }),
         );
 
-        // Validasi stok untuk tipe BARU kalau sale
         const newType = input.type ?? existing.type;
         if (newType === TransactionType.sale) {
           for (let i = 0; i < input.items.length; i++) {
             if (medicines[i].stock < input.items[i].quantity) {
-              // Kalau tidak cukup, rollback dulu stok yang tadi dikembalikan
               await Promise.all(
                 existing.details.map((detail: any) => {
                   const redoDelta =
@@ -150,7 +151,6 @@ export class TransactionsService {
           }
         }
 
-        // Terapkan efek stok BARU
         await Promise.all(
           input.items.map((item, idx) => {
             const delta =
@@ -159,7 +159,6 @@ export class TransactionsService {
           }),
         );
 
-        // Update detail di database
         const detailsData = input.items.map((item, idx) => ({
           medicineId: item.medicineId,
           quantity: item.quantity,
@@ -185,13 +184,12 @@ export class TransactionsService {
   async remove(id: string) {
     const existing = await this.findOne(id);
 
-    // Kembalikan stok sebelum hapus transaksi
     await Promise.all(
       existing.details.map((detail: any) => {
         const delta =
           existing.type === TransactionType.sale
-            ? detail.quantity // sale dihapus → kembalikan stok
-            : -detail.quantity; // purchase dihapus → kurangi stok
+            ? detail.quantity
+            : -detail.quantity;
         return this.inventoryService.adjustStock(detail.medicineId, delta);
       }),
     );
